@@ -38,3 +38,22 @@ alembic upgrade head
 - SQLAlchemy
 - Alembic
 - Python 3.8+
+
+3. **WorkFlow**:
+
+# 1. Develop your app normally
+python -m uvicorn app.main:app --reload
+# 2. When you change models, create migration
+alembic revision --autogenerate -m "Add email verification"
+# 3. Apply the migration
+alembic upgrade head
+# 4. Continue developing
+python -m uvicorn app.main:app --reload
+
+# See current migration version
+alembic current
+# See if there are pending migrations
+alembic heads  # Shows latest available
+alembic current  # Shows what's applied
+# If they're different, you need to upgrade
+alembic upgrade head
