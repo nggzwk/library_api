@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     Table,
     CheckConstraint,
+    Date
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -48,7 +49,7 @@ class Book(Base):
     author = Column(String(255), index=True, nullable=False)
     isbn = Column(String(13), unique=True, index=True, nullable=False)
     genre = Column(String(100), index=True)
-    published_date = Column(DateTime)
+    published_date = Column(Date)
     public_rating = Column(Float)
     description = Column(String(2000))
 
