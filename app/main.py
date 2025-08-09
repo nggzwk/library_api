@@ -1,9 +1,7 @@
 from typing import Union, Optional
-from datetime import datetime, date
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
 from alembic.config import Config
 from alembic import command
 from app.database import engine, Base, get_db
@@ -11,6 +9,7 @@ from app import models
 from sqlalchemy import or_
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from app.schemas import BookCreate, BookResponse, UserCreate, UserResponse
 
 
 @asynccontextmanager
@@ -25,40 +24,22 @@ app = FastAPI(lifespan=lifespan, title="Library api")
 Base.metadata.create_all(bind=engine)
 
 
-class BookCreate(BaseModel):
-    title: str = Field(..., min_length=1)
-    author: str = Field(..., min_length=1)
-    isbn: str = Field(..., min_length=1)
-    genre: str = Field(..., min_length=1)
-    description: str = Field(..., min_length=1)
-    published_date: Optional[date] = None
-
-
-class BookResponse(BaseModel):
-    id: int
-    title: str
-    author: str
-    isbn: str
-    genre: str
-    description: str
-    published_date: Optional[date] = None
-
-    class Config:
-        from_attributes = True
-
-
-class UserCreate(BaseModel):
-    username: str = Field(..., min_length=1)
-    email: str = Field(..., min_length=1)
-
-
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    email: str
-
-    class Config:
-        from_attributes = True
+def find_user_by_username_or_email(
+    db: Session, username: Optional[str], email: Optional[str]
+):
+    """
+    Helper function to find a user by username and/or email.
+    """
+    query = db.query(models.User)
+    if username and email:
+        return query.filter(
+            models.User.username == username, models.User.email == email
+        ).first()
+    elif username:
+        return query.filter(models.User.username == username).first()
+    elif email:
+        return query.filter(models.User.email == email).first()
+    return None
 
 
 @app.get("/books/search")
@@ -124,6 +105,13 @@ def get_all_books(
 
 @app.post("/books", response_model=BookResponse)
 def create_book(book: BookCreate, db: Session = Depends(get_db)):
+    for field_name in ["title", "author", "isbn", "genre", "description"]:
+        value = getattr(book, field_name)
+        if not value or value.strip() == "":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name.capitalize()} cannot be empty or whitespace.",
+            )
     try:
         existing_book = (
             db.query(models.Book).filter(models.Book.isbn == book.isbn).first()
@@ -177,16 +165,112 @@ def delete_book(
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
+@app.post("/user", response_model=UserResponse)
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    if not user.username or user.username.strip() == "":
+        raise HTTPException(status_code=400, detail="Username cannot be empty.")
+    if not user.email or user.email.strip() == "":
+        raise HTTPException(status_code=400, detail="Email cannot be empty.")
 
+    try:
+        username_exists = (
+            db.query(models.User).filter(models.User.username == user.username).first()
+        )
+        email_exists = (
+            db.query(models.User).filter(models.User.email == user.email).first()
+        )
+
+        if username_exists and email_exists:
+            raise HTTPException(
+                status_code=400,
+                detail="A user with this username and email already exists.",
+            )
+        elif username_exists:
+            raise HTTPException(
+                status_code=400,
+                detail="A user with this username already exists.",
+            )
+        elif email_exists:
+            raise HTTPException(
+                status_code=400,
+                detail="A user with this email already exists.",
+            )
+
+        db_user = models.User(username=user.username, email=user.email)
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return db_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/user/search", response_model=UserResponse)
+def get_user(
+    username: Optional[str] = Query(None, description="Username"),
+    email: Optional[str] = Query(None, description="Email"),
+    db: Session = Depends(get_db),
+):
+    if (not username or username.strip() == "") and (not email or email.strip() == ""):
+        raise HTTPException(
+            status_code=400, detail="You must provide a non-empty username or email."
+        )
+    try:
+        user = find_user_by_username_or_email(db, username, email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.delete("/user", response_model=UserResponse)
+def delete_user(
+    username: Optional[str] = Query(None, description="Username"),
+    email: Optional[str] = Query(None, description="Email"),
+    db: Session = Depends(get_db),
+):
+    if (not username or username.strip() == "") and (not email or email.strip() == ""):
+        raise HTTPException(
+            status_code=400, detail="You must provide a non-empty username or email."
+        )
+    try:
+        user = find_user_by_username_or_email(db, username, email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+        db.delete(user)
+        db.commit()
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/user", response_model=list[UserResponse])
+def get_all_users(
+    page: int = Query(..., gt=0, description="Page number"),
+    db: Session = Depends(get_db),
+):
+    try:
+        page_size = 20
+        offset = (page - 1) * page_size
+        users = db.query(models.User).offset(offset).limit(page_size)
+        return users
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 # get bookshelf
 # @app.get("/bookshelf", response_model=BookResponse)
-
-
-# post user
-# get user
-# delete user
 # post reading list
 # get reading list
 # delete reading list
