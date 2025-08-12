@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from datetime import date
 from pydantic import BaseModel, Field, field_validator
 
@@ -46,6 +46,37 @@ class UserResponse(BaseModel):
     id: int
     username: str
     email: str
+
+    class Config:
+        from_attributes = True
+
+class BookshelfEntry(BaseModel):
+    id: int
+    book_id: int
+    title: str
+    author: str
+    status: str
+    added_date: date
+
+class BookshelfResponse(BaseModel):
+    username: str
+    bookshelf: list[BookshelfEntry]
+
+
+class ReadingListCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+
+class ReadingListBookEntry(BaseModel):
+    id: int
+    book_id: int
+    title: str
+    author: str
+
+class ReadingListResponse(BaseModel):
+    id: int
+    username: str
+    reading_list_name: str
+    books: List[ReadingListBookEntry] = []
 
     class Config:
         from_attributes = True

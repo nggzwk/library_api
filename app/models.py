@@ -7,7 +7,7 @@ from sqlalchemy import (
     Float,
     Table,
     CheckConstraint,
-    Date
+    Date,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -37,7 +37,9 @@ class User(Base):
     )
 
     # Relationships
-    bookshelf_entries = relationship("Bookshelf", back_populates="user")
+    bookshelf_entries = relationship(
+        "Bookshelf", back_populates="user", cascade="all, delete-orphan"
+    )
     reading_lists = relationship("ReadingList", back_populates="user")
 
 
@@ -54,7 +56,9 @@ class Book(Base):
     description = Column(String(2000))
 
     # Relationships
-    bookshelf_entries = relationship("Bookshelf", back_populates="book")
+    bookshelf_entries = relationship(
+        "Bookshelf", back_populates="book", cascade="all, delete-orphan"
+    )
     reading_lists = relationship(
         "ReadingList", secondary=reading_list_books, back_populates="books"
     )
