@@ -181,6 +181,42 @@ def delete_book(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
+@app.get("/users", response_model=list[UserResponse])
+def get_all_users(
+    page: int = Query(..., gt=0, description="Page number"),
+    db: Session = Depends(get_db),
+):
+    try:
+        page_size = 20
+        offset = (page - 1) * page_size
+        users = db.query(models.User).offset(offset).limit(page_size)
+        return users
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/users/search", response_model=UserResponse)
+def get_user(
+    username: Optional[str] = Query(None, description="Username"),
+    email: Optional[str] = Query(None, description="Email"),
+    db: Session = Depends(get_db),
+):
+    if (not username or username.strip() == "") and (not email or email.strip() == ""):
+        raise HTTPException(
+            status_code=400, detail="You must provide a non-empty username or email."
+        )
+    try:
+        user = find_user_by_username_or_email(db, username, email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
 
 @app.post("/users", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -213,33 +249,17 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
                 detail="A user with this email already exists.",
             )
 
-        db_user = models.User(username=user.username, email=user.email)
+        now = datetime.now(timezone.utc)
+        db_user = models.User(
+            username=user.username,
+            email=user.email,
+            created_at=now,
+            updated_at=now,
+        )
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
         return db_user
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-
-@app.get("/users/search", response_model=UserResponse)
-def get_user(
-    username: Optional[str] = Query(None, description="Username"),
-    email: Optional[str] = Query(None, description="Email"),
-    db: Session = Depends(get_db),
-):
-    if (not username or username.strip() == "") and (not email or email.strip() == ""):
-        raise HTTPException(
-            status_code=400, detail="You must provide a non-empty username or email."
-        )
-    try:
-        user = find_user_by_username_or_email(db, username, email)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found.")
-        return user
     except HTTPException:
         raise
     except Exception as e:
@@ -271,20 +291,30 @@ def delete_user(
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
-@app.get("/users", response_model=list[UserResponse])
-def get_all_users(
-    page: int = Query(..., gt=0, description="Page number"),
+@app.put("/users/{id}", response_model=UserResponse)
+def update_user(
+    id: int,
+    user_update: UserCreate,
     db: Session = Depends(get_db),
 ):
-    try:
-        page_size = 20
-        offset = (page - 1) * page_size
-        users = db.query(models.User).offset(offset).limit(page_size)
-        return users
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    user = db.query(models.User).filter(models.User.id == id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
 
+    if user_update.username != user.username:
+        if db.query(models.User).filter(models.User.username == user_update.username).first():
+            raise HTTPException(status_code=400, detail="Username already exists.")
+    if user_update.email != user.email:
+        if db.query(models.User).filter(models.User.email == user_update.email).first():
+            raise HTTPException(status_code=400, detail="Email already exists.")
+
+    user.username = user_update.username
+    user.email = user_update.email
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(user)
+    return user
 
 @app.post("/users/bookshelf", response_model=BookshelfResponse)
 def add_book_to_bookshelf(

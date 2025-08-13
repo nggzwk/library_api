@@ -1,5 +1,5 @@
 from typing import Optional, List
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 
 class BookCreate(BaseModel):
@@ -46,6 +46,9 @@ class UserResponse(BaseModel):
     id: int
     username: str
     email: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
 
     class Config:
         from_attributes = True
