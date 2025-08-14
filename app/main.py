@@ -22,6 +22,7 @@ from app.schemas import (
 from app.models import Bookshelf
 from datetime import datetime, timezone
 from fastapi import Body, Path
+from app.openlibrary import search_openlibrary
 
 
 @asynccontextmanager
@@ -62,9 +63,13 @@ def dont_allow_empty_user(username):
 
 
 @app.get("/books/search")
-def get_book_by_name_or_author(
+async def get_book_by_name_or_author(
     title: Optional[str] = Query(None, description="Book title"),
     author: Optional[str] = Query(None, description="Author name"),
+    external: bool = Query(
+        False, description="Search on Open Library if not found locally"
+    ),
+    limit: int = Query(5, ge=1, le=20, description="Max results"),
     db: Session = Depends(get_db),
 ):
     if (title is None or title.strip() == "") and (
@@ -74,6 +79,7 @@ def get_book_by_name_or_author(
             status_code=400,
             detail="You must provide at least a non-empty title or author.",
         )
+
     try:
         query = db.query(models.Book)
         if title and author:
@@ -85,23 +91,49 @@ def get_book_by_name_or_author(
         elif author:
             query = query.filter(models.Book.author == author)
         books = query.all()
-        if not books:
+
+        if books:
+            title_books = [book for book in books if title and book.title == title]
+            author_books = [book for book in books if author and book.author == author]
+
+            response_content = {
+                "source": "local",
+                "title": [
+                    BookResponse.model_validate(book).model_dump()
+                    for book in title_books
+                ],
+                "author": [
+                    BookResponse.model_validate(book).model_dump()
+                    for book in author_books
+                ],
+            }
+            return JSONResponse(content=jsonable_encoder(response_content))
+        elif external:
+            data = await search_openlibrary(title or author, author, limit)
+            filtered = []
+            for doc in data.get("docs", []):
+                filtered.append(
+                    {
+                        "title": doc.get("title"),
+                        "author": (
+                            ", ".join(doc.get("author_name", []))
+                            if doc.get("author_name")
+                            else None
+                        ),
+                        "isbn": doc.get("isbn", [None])[0] if doc.get("isbn") else None,
+                        "genre": (
+                            ", ".join(doc.get("subject", []))
+                            if doc.get("subject")
+                            else None
+                        ),
+                        "published_date": doc.get("first_publish_year"),
+                    }
+                )
+            return {"source": "openlibrary", "results": filtered}
+        else:
             raise HTTPException(
-                status_code=404, detail="Bad request, book or author not registered."
+                status_code=404, detail="Book or author not found locally."
             )
-
-        title_books = [book for book in books if title and book.title == title]
-        author_books = [book for book in books if author and book.author == author]
-
-        response_content = {
-            "title": [
-                BookResponse.model_validate(book).model_dump() for book in title_books
-            ],
-            "author": [
-                BookResponse.model_validate(book).model_dump() for book in author_books
-            ],
-        }
-        return JSONResponse(content=jsonable_encoder(response_content))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -180,6 +212,7 @@ def delete_book(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
 
 @app.get("/users", response_model=list[UserResponse])
 def get_all_users(
@@ -302,7 +335,11 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found.")
 
     if user_update.username != user.username:
-        if db.query(models.User).filter(models.User.username == user_update.username).first():
+        if (
+            db.query(models.User)
+            .filter(models.User.username == user_update.username)
+            .first()
+        ):
             raise HTTPException(status_code=400, detail="Username already exists.")
     if user_update.email != user.email:
         if db.query(models.User).filter(models.User.email == user_update.email).first():
@@ -315,6 +352,7 @@ def update_user(
     db.commit()
     db.refresh(user)
     return user
+
 
 @app.post("/users/bookshelf", response_model=BookshelfResponse)
 def add_book_to_bookshelf(
