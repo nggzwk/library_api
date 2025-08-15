@@ -7,8 +7,6 @@ from alembic import command
 from app.database import engine, Base, get_db
 from app import models
 from sqlalchemy import or_
-from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
 from app.schemas import (
     BookCreate,
     BookResponse,
@@ -23,6 +21,7 @@ from app.models import Bookshelf
 from datetime import datetime, timezone
 from fastapi import Body, Path
 from app.openlibrary import search_openlibrary
+from async_lru import alru_cache
 
 
 @asynccontextmanager
@@ -62,14 +61,19 @@ def dont_allow_empty_user(username):
         )
 
 
+@alru_cache(maxsize=64)
+async def cached_search_openlibrary(title_or_author, author, limit):
+    return await search_openlibrary(title_or_author, author, limit)
+
+
 @app.get("/books/search")
 async def get_book_by_name_or_author(
     title: Optional[str] = Query(None, description="Book title"),
     author: Optional[str] = Query(None, description="Author name"),
-    external: bool = Query(
-        False, description="Search on Open Library if not found locally"
-    ),
     limit: int = Query(5, ge=1, le=20, description="Max results"),
+    external: bool = Query(
+        False, description="Search on Open Library if true."
+    ),
     db: Session = Depends(get_db),
 ):
     if (title is None or title.strip() == "") and (
@@ -92,27 +96,15 @@ async def get_book_by_name_or_author(
             query = query.filter(models.Book.author == author)
         books = query.all()
 
-        if books:
-            title_books = [book for book in books if title and book.title == title]
-            author_books = [book for book in books if author and book.author == author]
+        local_results = [
+            BookResponse.model_validate(book).model_dump() for book in books
+        ]
 
-            response_content = {
-                "source": "local",
-                "title": [
-                    BookResponse.model_validate(book).model_dump()
-                    for book in title_books
-                ],
-                "author": [
-                    BookResponse.model_validate(book).model_dump()
-                    for book in author_books
-                ],
-            }
-            return JSONResponse(content=jsonable_encoder(response_content))
-        elif external:
-            data = await search_openlibrary(title or author, author, limit)
-            filtered = []
+        external_results = []
+        if external:
+            data = await cached_search_openlibrary(title or author, author, limit)
             for doc in data.get("docs", []):
-                filtered.append(
+                external_results.append(
                     {
                         "title": doc.get("title"),
                         "author": (
@@ -129,11 +121,11 @@ async def get_book_by_name_or_author(
                         "published_date": doc.get("first_publish_year"),
                     }
                 )
-            return {"source": "openlibrary", "results": filtered}
-        else:
-            raise HTTPException(
-                status_code=404, detail="Book or author not found locally."
-            )
+
+        return {
+            "local": local_results,
+            "external": external_results,
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
