@@ -71,9 +71,7 @@ async def get_book_by_name_or_author(
     title: Optional[str] = Query(None, description="Book title"),
     author: Optional[str] = Query(None, description="Author name"),
     limit: int = Query(5, ge=1, le=20, description="Max results"),
-    external: bool = Query(
-        False, description="Search on Open Library if true."
-    ),
+    external: bool = Query(False, description="Search on Open Library if true."),
     db: Session = Depends(get_db),
 ):
     if (title is None or title.strip() == "") and (
@@ -122,10 +120,22 @@ async def get_book_by_name_or_author(
                     }
                 )
 
+        if not local_results:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": "No data found locally.",
+                    "local": [],
+                    "external": external_results,
+                },
+            )
+
         return {
             "local": local_results,
             "external": external_results,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
