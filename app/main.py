@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from fastapi import Body, Path
 from app.openlibrary import search_openlibrary
 from async_lru import alru_cache
+import logging
 
 
 @asynccontextmanager
@@ -74,6 +75,10 @@ async def get_book_by_name_or_author(
     external: bool = Query(False, description="Search on Open Library if true."),
     db: Session = Depends(get_db),
 ):
+    """
+    Search for books by title or author.
+    Also searchs on Open Library Api if true.
+    """
     if (title is None or title.strip() == "") and (
         author is None or author.strip() == ""
     ):
@@ -120,13 +125,13 @@ async def get_book_by_name_or_author(
                     }
                 )
 
-        if not local_results:
+        if not local_results and not external:
             raise HTTPException(
                 status_code=404,
                 detail={
                     "message": "No data found locally.",
                     "local": [],
-                    "external": external_results,
+                    "external": [],
                 },
             )
 
@@ -146,6 +151,9 @@ def get_all_books(
     page: int = Query(..., gt=0, description="Page number"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Get all locally stored books.
+    """
     try:
         page_size = 20
         offset = (page - 1) * page_size
@@ -158,6 +166,9 @@ def get_all_books(
 
 @app.post("/books", response_model=BookResponse)
 def create_book(book: BookCreate, db: Session = Depends(get_db)):
+    """ "
+    Create a book to be stored locally.
+    """
     for field_name in ["title", "author", "isbn", "genre", "description"]:
         value = getattr(book, field_name)
         if not value or value.strip() == "":
@@ -201,6 +212,9 @@ def delete_book(
     id: int = Path(..., description="Book ID"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Delete locally stored book by its ID.
+    """
 
     try:
         book_to_delete = db.query(models.Book).filter(models.Book.id == id).first()
@@ -216,11 +230,32 @@ def delete_book(
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
+@app.get("/cache/openlibrary/info")
+async def get_openlibrary_cache_info():
+    """Get cache statistics for the OpenLibrary search cache."""
+    try:
+        info = cached_search_openlibrary.cache_info()  # <-- no await here
+        return {k: getattr(info, k) for k in info._fields}
+    except Exception as e:
+        logging.exception("Error getting cache info")
+        raise HTTPException(status_code=500, detail=f"Cache error: {str(e)}")
+
+
+@app.post("/cache/openlibrary/clear")
+async def clear_openlibrary_cache():
+    """Clear the OpenLibrary search cache."""
+    await cached_search_openlibrary.cache_clear()
+    return {"detail": "Cache cleared."}
+
+
 @app.get("/users", response_model=list[UserResponse])
 def get_all_users(
     page: int = Query(..., gt=0, description="Page number"),
     db: Session = Depends(get_db),
 ):
+    """
+    Retrieve a paginated list of all users.
+    """
     try:
         page_size = 20
         offset = (page - 1) * page_size
@@ -237,6 +272,9 @@ def get_user(
     email: Optional[str] = Query(None, description="Email"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Search user by name or email.
+    """
     if (not username or username.strip() == "") and (not email or email.strip() == ""):
         raise HTTPException(
             status_code=400, detail="You must provide a non-empty username or email."
@@ -255,6 +293,9 @@ def get_user(
 
 @app.post("/users", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    """ "
+    Create user with username and email. Id is generated.
+    """
     if not user.username or user.username.strip() == "":
         raise HTTPException(status_code=400, detail="Username cannot be empty.")
     if not user.email or user.email.strip() == "":
@@ -308,6 +349,9 @@ def delete_user(
     email: Optional[str] = Query(None, description="Email"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Delete user by id.
+    """
     if (not username or username.strip() == "") and (not email or email.strip() == ""):
         raise HTTPException(
             status_code=400, detail="You must provide a non-empty username or email."
@@ -332,6 +376,9 @@ def update_user(
     user_update: UserCreate,
     db: Session = Depends(get_db),
 ):
+    """ "
+    Update user by id.
+    """
     user = db.query(models.User).filter(models.User.id == id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -363,6 +410,9 @@ def add_book_to_bookshelf(
     status: str = Query("to_read", description="Reading status"),
     db: Session = Depends(get_db),
 ):
+    """
+    Bookshelf creation using book and statuses.
+    """
     dont_allow_empty_user(username)
 
     if not status or status.strip() == "":
@@ -417,6 +467,9 @@ def add_book_to_bookshelf(
 def get_user_bookshelf(
     username: str = Query(..., description="Username"), db: Session = Depends(get_db)
 ):
+    """ "
+    Get user bookshelf data list.
+    """
     dont_allow_empty_user(username)
 
     user = db.query(models.User).filter(models.User.username == username).first()
@@ -447,6 +500,9 @@ def update_bookshelf_status(
     new_status: str = Body(..., embed=True, description="New reading status"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Update bookshelf by user id.
+    """
 
     dont_allow_empty_user(username)
 
@@ -494,6 +550,9 @@ def create_reading_list(
     name: str = Query(..., description="Reading list name"),
     db: Session = Depends(get_db),
 ):
+    """ "
+    Create readinglist by book id.
+    """
 
     dont_allow_empty_user(username)
     user = db.query(models.User).filter(models.User.username == username).first()
@@ -539,6 +598,9 @@ def create_reading_list(
 def get_reading_lists(
     username: str = Query(..., description="Username"), db: Session = Depends(get_db)
 ):
+    """"
+    Get users readinglists by username.
+    """
     dont_allow_empty_user(username)
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
@@ -577,6 +639,9 @@ def delete_reading_list(
     name: str = Path(..., description="Reading list name"),
     db: Session = Depends(get_db),
 ):
+    """"
+    Delete user by username.
+    """
     dont_allow_empty_user(username)
     if not name or name.strip() == "":
         raise HTTPException(
