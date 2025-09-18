@@ -25,6 +25,7 @@ class BookResponse(BaseModel):
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=5)
     email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=6, max_length=20)
 
     @field_validator("username")
     @classmethod

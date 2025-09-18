@@ -19,10 +19,17 @@ from app.schemas import (
 )
 from app.models import Bookshelf
 from datetime import datetime, timezone
-from fastapi import Body, Path
+from fastapi import Body, Path, status
 from app.openlibrary import search_openlibrary
 from async_lru import alru_cache
 import logging
+from fastapi.security import OAuth2PasswordRequestForm
+from app.auth import (
+    authenticate_user,
+    create_access_token,
+    get_password_hash,
+    get_current_user,
+)
 
 
 @asynccontextmanager
@@ -65,6 +72,57 @@ def dont_allow_empty_user(username):
 @alru_cache(maxsize=64)
 async def cached_search_openlibrary(title_or_author, author, limit):
     return await search_openlibrary(title_or_author, author, limit)
+
+
+@app.post("/token")
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
+):
+    if not form_data.username or form_data.username.strip() == "":
+        raise HTTPException(status_code=400, detail="Username cannot be empty or whitespace.")
+    if not form_data.password or form_data.password.strip() == "":
+        raise HTTPException(status_code=400, detail="Password cannot be empty or whitespace.")
+
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    """User registration endpoint."""
+    if not user.username or user.username.strip() == "":
+        raise HTTPException(status_code=400, detail="Username cannot be empty.")
+    if not user.email or user.email.strip() == "":
+        raise HTTPException(status_code=400, detail="Email cannot be empty.")
+    if not user.password or user.password.strip() == "":
+        raise HTTPException(status_code=400, detail="Password cannot be empty.")
+
+    username_exists = (
+        db.query(models.User).filter(models.User.username == user.username).first()
+    )
+    email_exists = db.query(models.User).filter(models.User.email == user.email).first()
+
+    if username_exists:
+        raise HTTPException(status_code=400, detail="Username already exists.")
+    if email_exists:
+        raise HTTPException(status_code=400, detail="Email already exists.")
+
+    hashed_password = get_password_hash(user.password)
+    now = datetime.now(timezone.utc)
+    db_user = models.User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hashed_password,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
 
 
 @app.get("/books/search")
@@ -165,7 +223,11 @@ def get_all_books(
 
 
 @app.post("/books", response_model=BookResponse)
-def create_book(book: BookCreate, db: Session = Depends(get_db)):
+def create_book(
+    book: BookCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """ "
     Create a book to be stored locally.
     """
@@ -211,6 +273,7 @@ def create_book(book: BookCreate, db: Session = Depends(get_db)):
 def delete_book(
     id: int = Path(..., description="Book ID"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Delete locally stored book by its ID.
@@ -252,6 +315,7 @@ async def clear_openlibrary_cache():
 def get_all_users(
     page: int = Query(..., gt=0, description="Page number"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """
     Retrieve a paginated list of all users.
@@ -259,7 +323,7 @@ def get_all_users(
     try:
         page_size = 20
         offset = (page - 1) * page_size
-        users = db.query(models.User).offset(offset).limit(page_size)
+        users = db.query(models.User).offset(offset).limit(page_size).all()
         return users
     except Exception as e:
         db.rollback()
@@ -271,6 +335,7 @@ def get_user(
     username: Optional[str] = Query(None, description="Username"),
     email: Optional[str] = Query(None, description="Email"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Search user by name or email.
@@ -291,63 +356,12 @@ def get_user(
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
-@app.post("/users", response_model=UserResponse)
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    """ "
-    Create user with username and email. Id is generated.
-    """
-    if not user.username or user.username.strip() == "":
-        raise HTTPException(status_code=400, detail="Username cannot be empty.")
-    if not user.email or user.email.strip() == "":
-        raise HTTPException(status_code=400, detail="Email cannot be empty.")
-
-    try:
-        username_exists = (
-            db.query(models.User).filter(models.User.username == user.username).first()
-        )
-        email_exists = (
-            db.query(models.User).filter(models.User.email == user.email).first()
-        )
-
-        if username_exists and email_exists:
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this username and email already exists.",
-            )
-        elif username_exists:
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this username already exists.",
-            )
-        elif email_exists:
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this email already exists.",
-            )
-
-        now = datetime.now(timezone.utc)
-        db_user = models.User(
-            username=user.username,
-            email=user.email,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(db_user)
-        db.commit()
-        db.refresh(db_user)
-        return db_user
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-
 @app.delete("/users", response_model=UserResponse)
 def delete_user(
     username: Optional[str] = Query(None, description="Username"),
     email: Optional[str] = Query(None, description="Email"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Delete user by id.
@@ -375,6 +389,7 @@ def update_user(
     id: int,
     user_update: UserCreate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Update user by id.
@@ -409,6 +424,7 @@ def add_book_to_bookshelf(
     book_id: int = Query(..., description="Book ID"),
     status: str = Query("to_read", description="Reading status"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """
     Bookshelf creation using book and statuses.
@@ -465,7 +481,9 @@ def add_book_to_bookshelf(
 
 @app.get("/users/bookshelf", response_model=BookshelfResponse)
 def get_user_bookshelf(
-    username: str = Query(..., description="Username"), db: Session = Depends(get_db)
+    username: str = Query(..., description="Username"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Get user bookshelf data list.
@@ -499,6 +517,7 @@ def update_bookshelf_status(
     book_id: int = Query(..., description="Book ID"),
     new_status: str = Body(..., embed=True, description="New reading status"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Update bookshelf by user id.
@@ -549,6 +568,7 @@ def create_reading_list(
     username: str = Query(..., description="Username"),
     name: str = Query(..., description="Reading list name"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """ "
     Create readinglist by book id.
@@ -596,9 +616,11 @@ def create_reading_list(
 
 @app.get("/user/readinglists/", response_model=list[ReadingListResponse])
 def get_reading_lists(
-    username: str = Query(..., description="Username"), db: Session = Depends(get_db)
+    username: str = Query(..., description="Username"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    """"
+    """ "
     Get users readinglists by username.
     """
     dont_allow_empty_user(username)
@@ -638,8 +660,9 @@ def delete_reading_list(
     username: str = Query(..., description="Username"),
     name: str = Path(..., description="Reading list name"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    """"
+    """ "
     Delete user by username.
     """
     dont_allow_empty_user(username)
