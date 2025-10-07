@@ -1,6 +1,9 @@
 import pytest
 from unittest.mock import patch, Mock
 from fastapi import HTTPException
+from datetime import datetime, timezone
+from collections import namedtuple
+
 
 from app.main import (
     cached_search_openlibrary,
@@ -80,3 +83,87 @@ def test_login_invalid_user(monkeypatch):
         login(form, mock_db)
     assert exc.value.status_code == 400
     assert exc.value.detail == "Incorrect username or password"
+
+def make_user_create(username="user", email="user@example.com", password="pass"):
+    mock_user = Mock()
+    mock_user.username = username
+    mock_user.email = email
+    mock_user.password = password
+    return mock_user
+
+def test_register_user_success(monkeypatch):
+    mock_db = Mock()
+    mock_db.query().filter().first.side_effect = [None, None]
+    monkeypatch.setattr("app.main.get_password_hash", lambda pw: "hashed")
+    now = datetime.now(timezone.utc)
+    mock_user_obj = Mock()
+    monkeypatch.setattr("app.main.datetime", Mock(now=Mock(return_value=now)))
+    mock_db.add = Mock()
+    mock_db.commit = Mock()
+    mock_db.refresh = Mock()
+    user = make_user_create()
+
+    with patch("app.main.models.User", return_value=mock_user_obj) as user_ctor:
+        result = register_user(user, mock_db)
+        assert result == mock_user_obj
+        mock_db.add.assert_called_once_with(mock_user_obj)
+        mock_db.commit.assert_called_once()
+        mock_db.refresh.assert_called_once_with(mock_user_obj)
+        user_ctor.assert_called_once()
+
+@pytest.mark.parametrize(
+    "username,email,password,detail",
+    [
+        ("", "user@example.com", "pass", "Username cannot be empty."),
+        ("   ", "user@example.com", "pass", "Username cannot be empty."),
+        ("user", "", "pass", "Email cannot be empty."),
+        ("user", "   ", "pass", "Email cannot be empty."),
+        ("user", "user@example.com", "", "Password cannot be empty."),
+        ("user", "user@example.com", "   ", "Password cannot be empty."),
+    ],
+)
+def test_register_user_empty_fields(username, email, password, detail):
+    mock_db = Mock()
+    user = make_user_create(username=username, email=email, password=password)
+    with pytest.raises(HTTPException) as exc:
+        register_user(user, mock_db)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == detail
+
+def test_register_user_username_exists(monkeypatch):
+    mock_db = Mock()
+    mock_db.query().filter().first.side_effect = [Mock(), None]
+    user = make_user_create()
+    with pytest.raises(HTTPException) as exc:
+        register_user(user, mock_db)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Username already exists."
+
+def test_register_user_email_exists(monkeypatch):
+    mock_db = Mock()
+    mock_db.query().filter().first.side_effect = [None, Mock()]
+    user = make_user_create()
+    with pytest.raises(HTTPException) as exc:
+        register_user(user, mock_db)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Email already exists."
+
+@pytest.mark.asyncio
+async def test_get_openlibrary_cache_info(monkeypatch):
+    CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "maxsize", "currsize"])
+    monkeypatch.setattr(
+        "app.main.cached_search_openlibrary.cache_info",
+        lambda: CacheInfo(hits=1, misses=2, maxsize=10, currsize=3)
+    )
+    result = await get_openlibrary_cache_info()
+    assert result == {"hits": 1, "misses": 2, "maxsize": 10, "currsize": 3}
+
+@pytest.mark.asyncio
+async def test_clear_openlibrary_cache(monkeypatch):
+    called = {}
+    async def fake_clear():
+        called["ok"] = True
+    monkeypatch.setattr("app.main.cached_search_openlibrary.cache_clear", fake_clear)
+    result = await clear_openlibrary_cache()
+    assert result == {"detail": "Cache cleared."}
+    assert called["ok"]
